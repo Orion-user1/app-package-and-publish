@@ -1,5 +1,120 @@
 pipeline:
+  id: Publish_and_verify
+  name: Publish and verify
+  description: Packages the demo JAR with semantic versioning, checksums, SBOM and signatures, then publishes it to JFrog Artifactory.
+  tags:
+    ai_generated: ""
+  inputs:
+    ref:
+      type: string
+      required: true
+      description: Branch or tag of the devops-automation repository to check out
+  clone:
+    enabled: true
+    connector: connector_Github_3a28
+    repo: DevOps/devops-automation
+    ref: ${{ inputs.ref }}
   stages:
-    - steps:
-        - run:
-            script: echo "hello world"
+    - id: app_package_publish
+      name: App Package and Publish
+      runtime: cloud
+      platform:
+        os: linux
+        arch: amd64
+      steps:
+        - id: verify_jar_artifact
+          name: Verify JAR Artifact
+          run:
+            script: |-
+              echo "Verifying JAR artifact from build pipeline..."
+              JAR_PATH="/harness/demo.jar"
+              if [ ! -f "$JAR_PATH" ]; then
+                echo "ERROR: JAR artifact not found at $JAR_PATH"
+                exit 1
+              fi
+              cp "$JAR_PATH" ./demo.jar
+
+              # Locate the automation scripts in the cloned repository
+              if [ -d devops-automation/scripts ]; then
+                SCRIPTS_DIR="devops-automation/scripts"
+              else
+                SCRIPTS_DIR="scripts"
+              fi
+
+              # Share metadata with later steps through the stage workspace
+              cat > build.env <<EOF
+              export BUILD_ID="${DRONE_BUILD_NUMBER}"
+              export COMMIT_SHA="${{ codebase.commitSha }}"
+              export BRANCH="${{ codebase.branch }}"
+              export JAR_FILE="demo.jar"
+              export SCRIPTS_DIR="${SCRIPTS_DIR}"
+              EOF
+              echo "JAR artifact ready for packaging"
+        - id: set_version
+          name: Set Version
+          needs: [verify_jar_artifact]
+          run:
+            script: |-
+              . ./build.env
+              echo "Generating semantic version..."
+              export BUILD_NUMBER="${BUILD_ID}"
+              export BRANCH_NAME="${BRANCH}"
+              export PR_LABEL="${PR_LABEL:-patch}"
+              python3 "${SCRIPTS_DIR}/set_version.py"
+              VERSION=$(cat version.txt)
+              echo "export VERSION=\"${VERSION}\"" >> build.env
+              echo "Version: ${VERSION}"
+        - id: prepare_package
+          name: Prepare Package
+          needs: [set_version]
+          run:
+            script: |-
+              . ./build.env
+              python3 "${SCRIPTS_DIR}/package_app.py"
+        - id: package_deploy_template
+          name: Package Deploy Template
+          needs: [prepare_package]
+          run:
+            script: |-
+              . ./build.env
+              python3 "${SCRIPTS_DIR}/package_deploy_template.py"
+        - id: checksum
+          name: Generate Checksums
+          needs: [package_deploy_template]
+          run:
+            script: |-
+              . ./build.env
+              python3 "${SCRIPTS_DIR}/checksum.py"
+        - id: create_sbom
+          name: Create SBOM
+          needs: [checksum]
+          run:
+            script: |-
+              . ./build.env
+              python3 "${SCRIPTS_DIR}/create_sbom.py"
+        - id: sign_package
+          name: Sign Packages
+          needs: [create_sbom]
+          run:
+            script: |-
+              . ./build.env
+              python3 "${SCRIPTS_DIR}/sign_package.py"
+        - id: publish_package
+          name: Publish to Artifactory
+          needs: [sign_package]
+          run:
+            script: |-
+              . ./build.env
+              export ARTIFACTORY_URL="${JFROG_URL:-https://artifactory.company.com}"
+              export ARTIFACTORY_USERNAME="${JFROG_USERNAME}"
+              export ARTIFACTORY_PASSWORD="${JFROG_PASSWORD}"
+              export ARTIFACTORY_REPO="${JFROG_REPO:-libs-release-local}"
+              export APP_NAME="${APP_NAME:-demo}"
+
+              if python3 "${SCRIPTS_DIR}/publish_package.py"; then
+                echo "All artifacts published successfully"
+                echo "Artifact URL: ${ARTIFACTORY_URL}/${ARTIFACTORY_REPO}/${APP_NAME}/${VERSION}/"
+              else
+                echo "Failed to publish artifacts"
+                exit 1
+              fi
