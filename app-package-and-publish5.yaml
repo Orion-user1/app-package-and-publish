@@ -2,8 +2,6 @@ pipeline:
   id: Publish_and_verify
   name: Publish and verify
   description: Packages the demo JAR with semantic versioning, checksums, SBOM and signatures, then publishes it to JFrog Artifactory.
-  tags:
-    ai_generated: ""
   inputs:
     ref:
       type: string
